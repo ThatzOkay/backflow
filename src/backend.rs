@@ -248,6 +248,40 @@ impl Backend {
                 tracing::info!("Brokenithm TCP client backend is disabled");
             }
         }
+
+        // Start IO4 Serial backend if configured and enabled
+        if let Some(io4_serial_config) = &self.config.input.io4_serial {
+            if io4_serial_config.enabled {
+                tracing::info!(
+                    "Starting IO4 Serial backend serial_port={}",
+                    io4_serial_config.serial_port.clone()
+                );
+                let input_stream = self.streams.raw_input.clone();
+                let feedback_stream = self.streams.feedback.clone();
+                let serial_port = io4_serial_config.serial_port.clone();
+                let has_chuniio_proxy_config = self.config.output.chuniio_proxy.is_some();
+
+                self.service_manager.spawn(async move {
+                    use crate::input::io4_serial::{
+                        SliderSerialBackend
+                    };
+
+                    let mut backend = SliderSerialBackend::new(
+                        has_chuniio_proxy_config,
+                        serial_port,
+                        input_stream,
+                        feedback_stream,
+                    );
+                    if let Err(e) = backend.run().await {
+                        tracing::error!("IO4 serial slider backend error: {}", e);
+                    }
+                });
+            } else {
+                tracing::info!("IO4 Serial is disabled");
+            }
+        } else {
+            tracing::info!("IO4 Serial is disabled");
+        }
     }
 
     /// Start device filter and routing service that transforms raw input events and routes them to appropriate backends

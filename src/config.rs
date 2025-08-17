@@ -6,6 +6,7 @@ use crate::device_filter::KeyExpr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use zbus::zvariant::Str;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct AppConfig {
@@ -63,6 +64,8 @@ pub struct InputConfig {
     pub brokenithm: Option<BrokenithmConfig>,
     // #[serde(default)]
     // pub chuniio: Option<ChuniIoSerialConfig>,
+    #[serde(default)]
+    pub io4_serial: Option<IO4SerialConfig>,
 }
 
 impl Default for InputConfig {
@@ -71,6 +74,7 @@ impl Default for InputConfig {
             web: default_web_enabled(),
             unix: None,
             brokenithm: None,
+            io4_serial: None,
         }
     }
 }
@@ -315,6 +319,17 @@ pub struct BrokenithmConfig {
     pub host: String,
     #[serde(default)]
     pub idevice: Option<BrokenithmIdeviceConfig>,
+}
+
+fn default_io4_serial_enabled() -> bool { true }
+fn default_io4_serial_port() -> String { "/dev/ttyUSB0".to_string() }
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct IO4SerialConfig {
+    #[serde(default = "default_io4_serial_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_io4_serial_port")]
+    pub serial_port: String,
 }
 
 #[cfg(test)]
