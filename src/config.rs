@@ -1,7 +1,5 @@
 //! Config modules for the application.
 
-// todo: finish this file
-
 use crate::device_filter::KeyExpr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,19 +36,69 @@ impl AppConfig {
 
     /// Load configuration with fallback to defaults
     pub fn load_or_default() -> Self {
-        // Try to load from standard locations
-        // for now, backflow.toml is the only config file in the current directory
-        let config_paths = [std::path::PathBuf::from("backflow.toml")];
+        // Try to load from standard locations in order: CWD > .config > /etc
+        let config_paths = [
+            std::path::PathBuf::from("backflow.toml"),
+            dirs::config_dir()
+                .map(|config_dir| config_dir.join("backflow.toml"))
+                .unwrap_or_else(|| PathBuf::from("backflow.toml")),
+            std::path::PathBuf::from("/etc/backflow/backflow.toml"),
+        ];
 
         for path in &config_paths {
-            if let Ok(config) = Self::from_file(path) {
-                tracing::info!("Loaded configuration from: {}", path.display());
-                return config;
+            if path.exists() {
+                match Self::from_file(path) {
+                    Ok(mut config) => {
+                        tracing::info!("Loaded configuration from: {}", path.display());
+                        config.validate_and_fix();
+                        return config;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load config from {}: {}. Trying next location.",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+                // Only try the first existing config file
+                break;
             }
         }
 
         tracing::info!("No configuration file found, using defaults");
-        Self::default()
+        let mut config = Self::default();
+        config.validate_and_fix();
+        config
+    }
+
+    /// Validate and fix configuration inconsistencies
+    pub fn validate_and_fix(&mut self) {
+        // Check if chuniio_proxy is enabled
+        let chuniio_proxy_enabled = self
+            .output
+            .chuniio_proxy
+            .as_ref()
+            .map(|config| config.enabled)
+            .unwrap_or(false);
+
+        if chuniio_proxy_enabled {
+            // If chuniio_proxy is enabled, we should not read from a socket for feedback
+            // Clear the socket_path if it's configured
+            if let Some(ref mut chuniio_feedback) = self.feedback.chuniio {
+                if chuniio_feedback.socket_path.is_some() {
+                    tracing::warn!(
+                        "ChuniIO feedback socket_path ({:?}) will be ignored because chuniio_proxy is enabled. Feedback will be fed from chuniio_proxy instead.",
+                        chuniio_feedback.socket_path
+                    );
+                    chuniio_feedback.socket_path = None;
+                }
+            } else {
+                // Auto-enable chuniio feedback with default settings when chuniio_proxy is enabled
+                tracing::info!("Auto-enabling ChuniIO feedback because chuniio_proxy is enabled");
+                self.feedback.chuniio = Some(ChuniIoRgbConfig::default());
+            }
+        }
     }
 }
 
@@ -103,7 +151,12 @@ fn default_unix_socket_path() -> PathBuf {
         return PathBuf::from(env_path);
     }
     let uid = nix::unistd::Uid::effective().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/backflow"))
+    if uid == 0 {
+        // If running as root, use /run/backflow directly
+        PathBuf::from("/run/backflow")
+    } else {
+        PathBuf::from(format!("/run/user/{uid}/backflow"))
+    }
 }
 
 // set web.enabled = false in [input.web] to explicitly disable the web backend
@@ -205,27 +258,71 @@ pub struct DeviceConfig {
 
 mod keyexpr_remap_serde {
     use super::KeyExpr;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserializer, Serializer};
     use std::collections::HashMap;
+
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use std::fmt;
 
     pub fn serialize<S>(map: &HashMap<String, KeyExpr>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let as_str_map: HashMap<&String, String> =
-            map.iter().map(|(k, v)| (k, format!("{v}"))).collect();
-        as_str_map.serialize(serializer)
+        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            match v {
+                KeyExpr::Combo(keys) => {
+                    ser_map.serialize_entry(k, keys)?;
+                }
+                _ => {
+                    ser_map.serialize_entry(k, &format!("{v}"))?;
+                }
+            }
+        }
+        ser_map.end()
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<String, KeyExpr>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let str_map = HashMap::<String, String>::deserialize(deserializer)?;
-        Ok(str_map
-            .into_iter()
-            .map(|(k, v)| (k, KeyExpr::parse(&v)))
-            .collect())
+        struct KeyExprMapVisitor;
+        impl<'de> Visitor<'de> for KeyExprMapVisitor {
+            type Value = HashMap<String, KeyExpr>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map of key remappings")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut map = HashMap::new();
+                while let Some((k, v)) = access.next_entry::<String, serde_json::Value>()? {
+                    let expr = match v {
+                        serde_json::Value::String(s) => KeyExpr::parse(&s),
+                        serde_json::Value::Array(arr) => {
+                            let keys: Vec<String> = arr
+                                .into_iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if keys.len() == 1 {
+                                KeyExpr::Single(keys[0].clone())
+                            } else {
+                                KeyExpr::Combo(keys)
+                            }
+                        }
+                        _ => return Err(de::Error::custom("Invalid value for KeyExpr")),
+                    };
+                    map.insert(k, expr);
+                }
+                Ok(map)
+            }
+        }
+        deserializer.deserialize_map(KeyExprMapVisitor)
     }
 }
 
@@ -646,6 +743,7 @@ mod tests {
 
     #[test]
     fn test_device_config_with_keyexpr_combo_and_sequence() {
+        // Test both string and array TOML syntax for combos
         let toml_str = r#"
             [device."advanced_device"]
             map_backend = "uinput"
@@ -654,6 +752,7 @@ mod tests {
             [device."advanced_device".remap]
             "SLIDER_1" = "KEY_A+KEY_B"
             "SLIDER_2" = "KEY_C,KEY_D,KEY_E"
+            "SLIDER_3" = ["KEY_X", "KEY_Y"]
             "GAME_1" = "KEY_SPACE"
         "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
@@ -661,7 +760,7 @@ mod tests {
         assert_eq!(device_config.map_backend, "uinput");
         assert_eq!(device_config.device_type, "keyboard");
 
-        // Test combo expression
+        // Test combo expression (string syntax)
         assert_eq!(
             device_config.remap.get("SLIDER_1"),
             Some(&KeyExpr::Combo(vec![
@@ -670,13 +769,22 @@ mod tests {
             ]))
         );
 
-        // Test sequence expression
+        // Test sequence expression (string syntax)
         assert_eq!(
             device_config.remap.get("SLIDER_2"),
             Some(&KeyExpr::Sequence(vec![
                 "KEY_C".to_string(),
                 "KEY_D".to_string(),
                 "KEY_E".to_string()
+            ]))
+        );
+
+        // Test combo expression (array syntax)
+        assert_eq!(
+            device_config.remap.get("SLIDER_3"),
+            Some(&KeyExpr::Combo(vec![
+                "KEY_X".to_string(),
+                "KEY_Y".to_string()
             ]))
         );
 
