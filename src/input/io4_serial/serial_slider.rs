@@ -91,7 +91,7 @@ impl SerialSlider {
             self.send_command(SliderCommand::SliderInit, None);
 
             let mut response_buffer = [0u8; 4];
-            let result = self.serial_port.read_exact(&mut response_buffer);
+            let _result = self.serial_port.read_exact(&mut response_buffer);
 
             if response_buffer == [0xff, 0x10, 0x00, 0xf1] {
                 return Ok(true);

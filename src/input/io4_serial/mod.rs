@@ -1,8 +1,7 @@
 mod serial_slider;
 
-use tracing_subscriber::fmt::writer;
 
-use crate::feedback::{self, FeedbackEvent, FeedbackEventStream, LedEvent};
+use crate::feedback::{FeedbackEvent, FeedbackEventStream, LedEvent};
 use crate::input::io4_serial::serial_slider::{SerialSlider, SliderCommand};
 use crate::input::{InputBackend, InputEvent, InputEventPacket, InputEventStream, KeyboardEvent};
 use std::sync::Arc;
@@ -28,21 +27,6 @@ impl SliderSerialBackend {
             input_stream,
             feedback_stream,
         }
-    }
-
-    pub async fn send_touch_packet(&self, packet: Option<InputEventPacket>) -> eyre::Result<()> {
-        Ok(if packet.is_some() {
-            tracing::debug!("Sending slider input: {:?}", packet);
-            let result = self.input_stream.send(packet.unwrap()).await;
-
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Failed to send slider input: {:?}", e);
-                    return Err(eyre::eyre!("Failed to send slider input"));
-                }
-            }
-        })
     }
 }
 
@@ -84,12 +68,8 @@ impl InputBackend for SliderSerialBackend {
         // Send command to start touch input
         slider.send_command(SliderCommand::InputStart, None);
 
-        slider.send_led_reactive([
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0,
-        ]);
+        slider.send_led_reactive([0; 32]);
 
-        let mut stop_loop = false;
         let mut error_count = 0;
 
         let shared_slider = Arc::new(tokio::sync::Mutex::new(slider));
